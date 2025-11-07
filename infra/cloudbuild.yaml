@@ -1,9 +1,9 @@
 steps:
-  # Step 1: Build the Docker image
+  # Step 1: Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/scenepulse/backend:latest', './backend']
 
-  # Step 2: Push the image to Artifact Registry
+  # Step 2: Push image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/scenepulse/backend:latest']
 
@@ -18,10 +18,14 @@ steps:
       - --region=us-central1
       - --platform=managed
       - --allow-unauthenticated
-      - --service-account=scenepulse-orchestrator-sa@${PROJECT_ID}.iam.gserviceaccount.com
+      # --- THIS LINE IS NOW FIXED ---
+      - --service-account=scenepulse-orchestrator-sa@$PROJECT_ID.iam.gserviceaccount.com
       - --memory=512Mi
       - --max-instances=3
       - --port=8080
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/scenepulse/backend:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
