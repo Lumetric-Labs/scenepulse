@@ -311,3 +311,12 @@ async def create_run_and_get_upload_urls(
         contact_phone=contact_phone_formatted,
         upload_urls=upload_urls_response
     )
+# ---- Debug endpoint: list all routes (API-key protected) ----
+@app.get("/routes", tags=["debug"])
+def list_routes(_: bool = Depends(require_api_key)):
+    out = []
+    for r in app.routes:
+        methods = sorted(list(getattr(r, "methods", []) or []))
+        out.append({"path": r.path, "methods": methods})
+    return {"routes": sorted(out, key=lambda x: x["path"])}
+# -------------------------------------------------------------
