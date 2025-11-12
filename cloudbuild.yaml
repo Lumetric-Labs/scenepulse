@@ -1,17 +1,17 @@
 steps:
   # Build backend image from backend/Dockerfile
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest', './backend']
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/scenepulse-prod/scenepulse/backend:latest', './backend']
 
   # Push backend image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest']
+    args: ['push', 'us-central1-docker.pkg.dev/scenepulse-prod/scenepulse/backend:latest']
 
   # Deploy backend to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     args:
       ['gcloud', 'run', 'deploy', 'backend',
-       '--image', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest',
+       '--image', 'us-central1-docker.pkg.dev/scenepulse-prod/scenepulse/backend:latest',
        '--region', 'us-central1',
        '--platform', 'managed',
        '--allow-unauthenticated']
