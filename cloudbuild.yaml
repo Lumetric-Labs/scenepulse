@@ -1,0 +1,27 @@
+steps:
+  # Build backend image and push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest', '.']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest']
+
+  # Deploy backend to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    args:
+      ['gcloud', 'run', 'deploy', 'backend',
+       '--image', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest',
+       '--region', 'us-central1',
+       '--platform', 'managed',
+       '--allow-unauthenticated']
+
+  # Upload frontend to GCS
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    args: ['gsutil', '-m', 'cp', '-r', 'frontend/*', 'gs://scenepulse-frontend-bucket']
+
+  # Invalidate CDN cache
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    args: ['gcloud', 'compute', 'url-maps', 'invalidate-cdn-cache',
+           'scenepulse-cdn', '--path', '/*']
+
+options:
+  logging: CLOUD_LOGGING_ONLY
