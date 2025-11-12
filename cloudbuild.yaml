@@ -1,7 +1,9 @@
 steps:
-  # Build backend image and push to Artifact Registry
+  # Build backend image from backend/Dockerfile
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest', '.']
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest', './backend']
+
+  # Push backend image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'us-central1-docker.pkg.dev/scenepulse-prod/backend/backend:latest']
 
