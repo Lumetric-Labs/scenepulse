@@ -1,13 +1,13 @@
 steps:
-  # Step 1: Build Docker image
+  # Step 1: Build backend image from backend/Dockerfile
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/scenepulse/backend:latest', './backend']
 
-  # Step 2: Push image to Artifact Registry
+  # Step 2: Push backend image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/scenepulse/backend:latest']
 
-  # Step 3: Deploy to Cloud Run
+  # Step 3: Deploy backend to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -18,14 +18,23 @@ steps:
       - --region=us-central1
       - --platform=managed
       - --allow-unauthenticated
-      # --- THIS LINE IS NOW FIXED ---
       - --service-account=scenepulse-orchestrator-sa@$PROJECT_ID.iam.gserviceaccount.com
       - --memory=512Mi
       - --max-instances=3
       - --port=8080
 
-images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/scenepulse/backend:latest'
+  # Step 4: Upload frontend to GCS (multi-region us bucket)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gsutil
+    args: ['-m', 'cp', '-r', 'frontend/*', 'gs://portal.lumetriclabs.com']
 
-options:
-  logging: CLOUD_LOGGING_ONLY
+  # Step 5: Invalidate CDN cache
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - compute
+      - url-maps
+      - invalidate-cdn-cache
+      - scenepulse-cdn
+      - --path=/*
+      - --project
