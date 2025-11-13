@@ -1,15 +1,9 @@
-fastapi==0.115.5
-uvicorn[standard]==0.32.0
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
 
-# Google client libraries
-google-cloud-firestore==2.16.0
-google-cloud-storage==2.18.2
-google-cloud-logging==3.11.2
+google-cloud-firestore==2.17.0
+google-cloud-storage==2.16.0
 google-auth==2.35.0
 google-api-core==2.19.1
-grpcio==1.66.2
-proto-plus==1.24.0
 
-# FastAPI extras
-python-multipart==0.0.12
-pydantic==2.9.2
+pydantic==1.10.15
