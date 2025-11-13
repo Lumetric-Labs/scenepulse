@@ -1,4 +1,11 @@
 # main.py — ScenePulse Backend (one video + optional multiple docs per run)
+"""
+FastAPI backend for ScenePulse.
+- One video per run
+- Optional multiple supporting documents
+- V4 signed PUT URLs using IAM-based signing (no private key file)
+- Firestore "runs" collection for metadata
+"""
 
 import os
 import uuid
@@ -16,6 +23,7 @@ from pydantic import BaseModel, Field, EmailStr
 
 from google.cloud import firestore
 from google.cloud import storage
+import google.auth
 
 # -------------------------------------------------------------------
 # Configuration / Environment
@@ -24,10 +32,21 @@ from google.cloud import storage
 API_KEY_HEADER = "x-api-key"
 API_KEY = os.getenv("SCENEPULSE_API_KEY", "changeme")
 
-PROJECT_ID = os.getenv("GCP_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
+# Use ADC (Application Default Credentials) and detect project if not set
+credentials, project_from_creds = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+
+PROJECT_ID = os.getenv("GCP_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT") or project_from_creds
+
 UPLOAD_BUCKET = os.getenv("UPLOAD_BUCKET", "scenepulse-prod-scenepulse-uploads")
 
-# Initialize clients (Cloud Run will inject credentials)
+# Service account used for signing URLs.
+# By default, assume the backend Cloud Run service account.
+SIGNING_SERVICE_ACCOUNT = os.getenv(
+    "SIGNING_SERVICE_ACCOUNT",
+    "scenepulse-backend-sa@scenepulse-prod.iam.gserviceaccount.com",
+)
+
+# Initialize clients
 firestore_client = firestore.Client(project=PROJECT_ID)
 storage_client = storage.Client(project=PROJECT_ID)
 upload_bucket = storage_client.bucket(UPLOAD_BUCKET)
@@ -86,7 +105,7 @@ class RunCreateResponse(BaseModel):
 # FastAPI app & CORS
 # -------------------------------------------------------------------
 
-app = FastAPI(title="ScenePulse API", version="2.0.0")
+app = FastAPI(title="ScenePulse API", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -116,6 +135,7 @@ def root():
         "status": "ok",
         "message": "ScenePulse API running",
         "project": PROJECT_ID,
+        "upload_bucket": UPLOAD_BUCKET,
     }
 
 
@@ -158,7 +178,7 @@ def create_run(payload: RunCreateRequest, _: bool = Depends(require_api_key)):
     doc_filenames = [f.strip() for f in payload.doc_filenames if f.strip()]
 
     # ----------------------------------------------------------------
-    # Generate signed URL for video
+    # Generate signed URL for video using IAM-based signing
     # ----------------------------------------------------------------
     video_blob_name = f"runs/{run_id}/video/{video_filename}"
     video_blob = upload_bucket.blob(video_blob_name)
@@ -170,6 +190,8 @@ def create_run(payload: RunCreateRequest, _: bool = Depends(require_api_key)):
             expiration=timedelta(minutes=30),
             method="PUT",
             content_type=payload.content_type or "video/*",
+            credentials=credentials,
+            service_account_email=SIGNING_SERVICE_ACCOUNT,
         )
     except Exception as e:
         raise HTTPException(
@@ -201,6 +223,8 @@ def create_run(payload: RunCreateRequest, _: bool = Depends(require_api_key)):
                 version="v4",
                 expiration=timedelta(minutes=30),
                 method="PUT",
+                credentials=credentials,
+                service_account_email=SIGNING_SERVICE_ACCOUNT,
             )
         except Exception as e:
             raise HTTPException(
