@@ -10,11 +10,14 @@ steps:
   # Deploy backend to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     args:
-      ['gcloud', 'run', 'deploy', 'backend',
-       '--image', 'us-central1-docker.pkg.dev/scenepulse-prod/scenepulse/backend:latest',
-       '--region', 'us-central1',
-       '--platform', 'managed',
-       '--allow-unauthenticated']
+      [
+        'gcloud', 'run', 'deploy', 'backend',
+        '--image', 'us-central1-docker.pkg.dev/scenepulse-prod/scenepulse/backend:latest',
+        '--region', 'us-central1',
+        '--platform', 'managed',
+        '--allow-unauthenticated',
+        '--service-account', 'scenepulse-backend-sa@scenepulse-prod.iam.gserviceaccount.com'
+      ]
 
   # Upload frontend to GCS
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
