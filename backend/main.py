@@ -1,317 +1,129 @@
+# main.py — ScenePulse Backend (one video + optional multiple docs per run)
+
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict
+from typing import List, Optional, Dict, Any
 
 from fastapi import (
     FastAPI,
-    Header,
     HTTPException,
     Depends,
     Request,
-    Query,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, EmailStr
 
 from google.cloud import firestore
 from google.cloud import storage
 
-# --------------------------------------------------------------------
-# Config
-# --------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Configuration / Environment
+# -------------------------------------------------------------------
 
-PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "scenepulse-prod")
-API_KEY = os.getenv("SCENEPULSE_API_KEY", "bobs-your-uncle-001")
-UPLOAD_BUCKET = os.getenv(
-    "SCENEPULSE_UPLOAD_BUCKET",
-    "scenepulse-prod-scenepulse-uploads",
-)
+API_KEY_HEADER = "x-api-key"
+API_KEY = os.getenv("SCENEPULSE_API_KEY", "changeme")
 
-# Firestore client
-db = firestore.Client(project=PROJECT_ID)
+PROJECT_ID = os.getenv("GCP_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
+UPLOAD_BUCKET = os.getenv("UPLOAD_BUCKET", "scenepulse-prod-scenepulse-uploads")
 
-# Storage client
+# Initialize clients (Cloud Run will inject credentials)
+firestore_client = firestore.Client(project=PROJECT_ID)
 storage_client = storage.Client(project=PROJECT_ID)
 upload_bucket = storage_client.bucket(UPLOAD_BUCKET)
 
-app = FastAPI(title="ScenePulse API")
+# -------------------------------------------------------------------
+# Auth dependency
+# -------------------------------------------------------------------
 
-# --------------------------------------------------------------------
-# ✅ CORS Configuration
-# --------------------------------------------------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://portal.lumetriclabs.com",
-        "http://localhost:8501",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------
-
-def require_api_key(x_api_key: str = Header(default="")):
-    if not x_api_key or x_api_key != API_KEY:
+def require_api_key(request: Request) -> bool:
+    key = request.headers.get(API_KEY_HEADER)
+    if key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
 
-
-def new_run_id() -> str:
-    return "run_" + uuid.uuid4().hex[:12]
-
-
-def new_test_id() -> str:
-    return "test_" + uuid.uuid4().hex[:12]
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def format_phone_number(phone: Optional[str]) -> Optional[str]:
-    """
-    Take a phone string, strip non-digits, and if it is 10 digits
-    format it like (555) 987-1234. Otherwise return the original string.
-    """
-    if not phone:
-        return None
-    digits = "".join(ch for ch in phone if ch.isdigit())
-    if len(digits) == 10:
-        return f"({digits[0:3]}) {digits[3:6]}-{digits[6:10]}"
-    return phone
-
-
-# --------------------------------------------------------------------
+# -------------------------------------------------------------------
 # Pydantic models
-# --------------------------------------------------------------------
+# -------------------------------------------------------------------
 
 class RunCreateRequest(BaseModel):
-    company_name: str
-    project_id: str
-    contact_name: str
-    contact_email: str
-    contact_phone: str
-    creative_id: str
-    variant: str
-    optional_label: Optional[str] = None
-    internal_notes: Optional[str] = None
-    video_filename: str
-    doc_filenames: List[str] = []
+    project_id: str = Field(..., description="Customer project identifier")
+    company_name: str = Field(..., description="Customer company name")
+    contact_name: str = Field(..., description="Primary contact name")
+    contact_email: EmailStr = Field(..., description="Primary contact email")
+    contact_phone: str = Field(..., description="Primary contact phone (raw)")
+    creative_id: str = Field(..., description="Creative identifier")
+    variant: str = Field(..., description="Variant label, e.g. A/B")
+    video_filename: str = Field(..., description="Name of the video file to upload")
+    original_filename: Optional[str] = Field(
+        None, description="Original video filename as provided by customer"
+    )
+    content_type: str = Field(..., description="MIME type of the video")
+    label: Optional[str] = Field("", description="Freeform label/tag")
+    notes: Optional[str] = Field("", description="Freeform notes")
+    doc_filenames: List[str] = Field(
+        default_factory=list,
+        description="Optional list of supporting document filenames to upload",
+    )
+
 
 class SignedURLInfo(BaseModel):
     original_filename: str
     signed_url: str
     storage_path: str
-    key: str
+    key: str  # e.g. "video_file" or "doc_file_0"
+
 
 class RunCreateResponse(BaseModel):
     run_id: str
-    contact_phone: Optional[str]
+    project_id: str
+    video_storage_path: str
+    doc_storage_paths: List[str]
     upload_urls: List[SignedURLInfo]
 
-class TestCreateRequest(BaseModel):
-    project_id: str
-    creative_id: str
-    variant: str
-    notes: Optional[str] = None
-    label: Optional[str] = None
 
-class TestResponse(BaseModel):
-    test_id: str
-    status: str
-    message: str
-    project_id: str
-    creative_id: str
-    variant: str
+# -------------------------------------------------------------------
+# FastAPI app & CORS
+# -------------------------------------------------------------------
+
+app = FastAPI(title="ScenePulse API", version="2.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # tighten later for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------------------------------------------------------------------
+# Helper: Firestore serialization
+# -------------------------------------------------------------------
+
+def _serialize_datetime(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
-# --------------------------------------------------------------------
-# Basic endpoints
-# --------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "ScenePulse API running", "project": PROJECT_ID}
+    return {
+        "status": "ok",
+        "message": "ScenePulse API running",
+        "project": PROJECT_ID,
+    }
 
 
 @app.get("/secure/ping")
-def secure_ping(auth: bool = Depends(require_api_key)):
-    return {
-        "status": "ok",
-        "message": "Authenticated request successful from ScenePulse API.",
-    }
+def secure_ping(_: bool = Depends(require_api_key)):
+    return {"status": "ok", "message": "secure pong"}
 
 
-# --------------------------------------------------------------------
-# Test endpoints
-# --------------------------------------------------------------------
-
-@app.post("/api/v1/tests", response_model=TestResponse)
-def create_test(payload: TestCreateRequest, auth: bool = Depends(require_api_key)):
-    test_id = new_test_id()
-    doc = {
-        "test_id": test_id,
-        "project_id": payload.project_id,
-        "creative_id": payload.creative_id,
-        "variant": payload.variant,
-        "label": payload.label or "",
-        "notes": payload.notes or "",
-        "status": "queued",
-        "created_at": now_iso(),
-    }
-
-    db.collection("tests").document(test_id).set(doc)
-
-    return TestResponse(
-        test_id=test_id,
-        status="queued",
-        message="Test created and queued for processing.",
-        project_id=payload.project_id,
-        creative_id=payload.creative_id,
-        variant=payload.variant,
-    )
-
-
-@app.get("/api/v1/tests/{test_id}")
-def get_test_status(test_id: str, auth: bool = Depends(require_api_key)):
-    doc_ref = db.collection("tests").document(test_id)
-    snap = doc_ref.get()
-    if not snap.exists:
-        raise HTTPException(status_code=404, detail="Test not found")
-    return snap.to_dict()
-
-
-# --------------------------------------------------------------------
-# Runs endpoints
-# --------------------------------------------------------------------
-
-@app.get("/v1/runs/{run_id}")
-def get_run(run_id: str, auth: bool = Depends(require_api_key)):
-    doc_ref = db.collection("runs").document(run_id)
-    snap = doc_ref.get()
-    if not snap.exists:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return snap.to_dict()
-
-
-@app.get("/v1/runs")
-def list_runs(
-    limit: int = Query(50, ge=1, le=100),
-    auth: bool = Depends(require_api_key),
-):
-    runs_ref = db.collection("runs").order_by(
-        "created_at", direction=firestore.Query.DESCENDING
-    )
-    docs = runs_ref.limit(limit).stream()
-    runs: List[dict] = [d.to_dict() for d in docs]
-    return {"runs": runs}
-
-
-# --------------------------------------------------------------------
-# Create Run & Signed URLs
-# --------------------------------------------------------------------
-
-@app.post("/v1/runs", response_model=RunCreateResponse)
-async def create_run_and_get_upload_urls(
-    run_request: RunCreateRequest, auth: bool = Depends(require_api_key)
-):
-    if not upload_bucket:
-        raise HTTPException(status_code=500, detail="Storage client not initialized")
-
-    run_id = new_run_id()
-    run_ref = db.collection("runs").document(run_id)
-    created_at = now_iso()
-    
-    upload_urls_response = []
-    video_storage_path = ""
-    doc_storage_paths = []
-    extra_docs_list = []
-
-    # Generate Video Signed URL
-    try:
-        video_blob_name = f"runs/{run_id}/video/{run_request.video_filename}"
-        video_blob = upload_bucket.blob(video_blob_name)
-        video_storage_path = f"gs://{UPLOAD_BUCKET}/{video_blob_name}"
-
-        video_url = video_blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(minutes=30),
-            method="PUT",
-            content_type="video/*"
-        )
-        upload_urls_response.append(SignedURLInfo(
-            original_filename=run_request.video_filename,
-            signed_url=video_url,
-            storage_path=video_storage_path,
-            key="video_file"
-        ))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not generate video URL: {e}")
-
-    # Generate Document Signed URLs
-    for i, doc_name in enumerate(run_request.doc_filenames):
-        doc_blob_name = f"runs/{run_id}/docs/{doc_name}"
-        doc_blob = upload_bucket.blob(doc_blob_name)
-        doc_storage_path = f"gs://{UPLOAD_BUCKET}/{doc_blob_name}"
-        doc_storage_paths.append(doc_storage_path)
-
-        doc_url = doc_blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(minutes=30),
-            method="PUT"
-        )
-        key = f"doc_file_{i}"
-        upload_urls_response.append(SignedURLInfo(
-            original_filename=doc_name,
-            signed_url=doc_url,
-            storage_path=doc_storage_path,
-            key=key
-        ))
-        if i > 0:
-            extra_docs_list.append({
-                "original_filename": doc_name,
-                "storage_path": doc_storage_path
-            })
-
-    # Create Firestore Document
-    try:
-        contact_phone_formatted = format_phone_number(run_request.contact_phone)
-        run_doc = {
-            "run_id": run_id,
-            "status": "upload_pending",
-            "created_at": created_at,
-            "company_name": run_request.company_name,
-            "project_id": run_request.project_id,
-            "contact_name": run_request.contact_name,
-            "contact_email": run_request.contact_email,
-            "contact_phone": contact_phone_formatted,
-            "contact_phone_raw": run_request.contact_phone,
-            "creative_id": run_request.creative_id,
-            "variant": run_request.variant,
-            "label": run_request.optional_label,
-            "notes": run_request.internal_notes,
-            "storage_path": video_storage_path,
-            "original_filename": run_request.video_filename,
-            "doc_storage_path": doc_storage_paths[0] if doc_storage_paths else None,
-            "extra_docs": extra_docs_list,
-            "score": None,
-            "insights": {},
-        }
-        run_ref.set(run_doc)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not create Firestore run: {e}")
-
-    return RunCreateResponse(
-        run_id=run_id,
-        contact_phone=contact_phone_formatted,
-        upload_urls=upload_urls_response
-    )
-# ---- Debug endpoint: list all routes (API-key protected) ----
 @app.get("/routes", tags=["debug"])
 def list_routes(_: bool = Depends(require_api_key)):
     out = []
@@ -319,4 +131,176 @@ def list_routes(_: bool = Depends(require_api_key)):
         methods = sorted(list(getattr(r, "methods", []) or []))
         out.append({"path": r.path, "methods": methods})
     return {"routes": sorted(out, key=lambda x: x["path"])}
-# -------------------------------------------------------------
+
+
+# -------------------------------------------------------------------
+# POST /v1/runs — create a run + signed URLs
+# -------------------------------------------------------------------
+
+@app.post("/v1/runs", response_model=RunCreateResponse)
+def create_run(payload: RunCreateRequest, _: bool = Depends(require_api_key)):
+    """
+    Create a new run representing ONE video + optional multiple docs.
+    Returns:
+      - run_id
+      - GCS storage paths
+      - Signed PUT URLs for video + docs
+    """
+    # Generate run ID
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+
+    # Normalize filenames
+    video_filename = payload.video_filename.strip()
+    if not video_filename:
+        raise HTTPException(status_code=400, detail="video_filename must not be empty")
+
+    doc_filenames = [f.strip() for f in payload.doc_filenames if f.strip()]
+
+    # ----------------------------------------------------------------
+    # Generate signed URL for video
+    # ----------------------------------------------------------------
+    video_blob_name = f"runs/{run_id}/video/{video_filename}"
+    video_blob = upload_bucket.blob(video_blob_name)
+    video_storage_path = f"gs://{UPLOAD_BUCKET}/{video_blob_name}"
+
+    try:
+        video_signed_url = video_blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=30),
+            method="PUT",
+            content_type=payload.content_type or "video/*",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not generate video signed URL: {e}",
+        )
+
+    upload_urls: List[SignedURLInfo] = [
+        SignedURLInfo(
+            original_filename=video_filename,
+            signed_url=video_signed_url,
+            storage_path=video_storage_path,
+            key="video_file",
+        )
+    ]
+
+    # ----------------------------------------------------------------
+    # Generate signed URLs for documents (optional)
+    # ----------------------------------------------------------------
+    doc_storage_paths: List[str] = []
+
+    for idx, doc_name in enumerate(doc_filenames):
+        doc_blob_name = f"runs/{run_id}/docs/{doc_name}"
+        doc_blob = upload_bucket.blob(doc_blob_name)
+        doc_storage_path = f"gs://{UPLOAD_BUCKET}/{doc_blob_name}"
+
+        try:
+            doc_signed_url = doc_blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(minutes=30),
+                method="PUT",
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not generate document signed URL for {doc_name}: {e}",
+            )
+
+        doc_storage_paths.append(doc_storage_path)
+        upload_urls.append(
+            SignedURLInfo(
+                original_filename=doc_name,
+                signed_url=doc_signed_url,
+                storage_path=doc_storage_path,
+                key=f"doc_file_{idx}",
+            )
+        )
+
+    # ----------------------------------------------------------------
+    # Persist run metadata to Firestore
+    # ----------------------------------------------------------------
+    run_doc: Dict[str, Any] = {
+        "run_id": run_id,
+        "project_id": payload.project_id,
+        "company_name": payload.company_name,
+        "contact_name": payload.contact_name,
+        "contact_email": payload.contact_email,
+        "contact_phone_raw": payload.contact_phone,
+        "contact_phone": payload.contact_phone,  # optional formatting later
+        "creative_id": payload.creative_id,
+        "variant": payload.variant,
+        "label": payload.label or "",
+        "notes": payload.notes or "",
+        "original_filename": payload.original_filename or video_filename,
+        "content_type": payload.content_type,
+        "status": "upload_pending",
+        "storage_path": video_storage_path,
+        "doc_storage_paths": doc_storage_paths,
+        "created_at": now,
+        "insights": {
+            "summary": "No summary provided.",
+            "recommended_action": "No recommendation provided.",
+            "lift_vs_baseline": 0.0,
+        },
+    }
+
+    firestore_client.collection("runs").document(run_id).set(run_doc)
+
+    # ----------------------------------------------------------------
+    # Return response
+    # ----------------------------------------------------------------
+    return RunCreateResponse(
+        run_id=run_id,
+        project_id=payload.project_id,
+        video_storage_path=video_storage_path,
+        doc_storage_paths=doc_storage_paths,
+        upload_urls=upload_urls,
+    )
+
+
+# -------------------------------------------------------------------
+# GET /v1/runs — list runs (simple pagination)
+# -------------------------------------------------------------------
+
+@app.get("/v1/runs")
+def list_runs(
+    limit: int = 20,
+    _: bool = Depends(require_api_key),
+):
+    """
+    List recent runs, newest first.
+    """
+    limit = max(1, min(limit, 100))
+    docs = (
+        firestore_client.collection("runs")
+        .order_by("created_at", direction=firestore.Query.DESCENDING)
+        .limit(limit)
+        .stream()
+    )
+
+    runs = []
+    for d in docs:
+        data = d.to_dict() or {}
+        # Serialize datetime fields
+        if isinstance(data.get("created_at"), datetime):
+            data["created_at"] = _serialize_datetime(data["created_at"])
+        runs.append(data)
+
+    return {"runs": runs}
+
+
+# -------------------------------------------------------------------
+# GET /v1/runs/{run_id} — fetch single run
+# -------------------------------------------------------------------
+
+@app.get("/v1/runs/{run_id}")
+def get_run(run_id: str, _: bool = Depends(require_api_key)):
+    doc = firestore_client.collection("runs").document(run_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Run not found")
+    data = doc.to_dict() or {}
+    if isinstance(data.get("created_at"), datetime):
+        data["created_at"] = _serialize_datetime(data["created_at"])
+    return data
